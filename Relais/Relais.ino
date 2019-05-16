@@ -28,14 +28,11 @@ bool debug = true;  //Affiche sur la console si True
 
 #define mqtt_server "192.168.0.60"
 #define CLIENT_NAME "ESP_"
+#define sensor1 "DHT22"
 
 // DHT22
 #define DHTPIN 2     // what digital pin the DHT22 is conected to
 #define DHTTYPE DHT22   // there are multiple kinds of DHT sensors
-#define sensor1 "DHT22"
-
-// adresse ESP
-char esp[50];
 
 //Buffer qui permet de décoder les messages MQTT reçus
 char message_buff_payload[100];
@@ -72,7 +69,7 @@ int setup_wifi(){
 //Connexion - Reconnexion MQTT
 void MQTTreconnect() {
   int tries = 0;
-  char orders_topic[50];
+ char orders_topic[50];
   //Boucle jusqu'à obtenir une reconnexion
   Serial.print("Connexion au serveur MQTT...");
   while (!MQTTclient.connected() && tries < 5) {
@@ -96,7 +93,6 @@ void MQTTreconnect() {
   
   MQTTclient.subscribe(orders_topic);
 }
-
 
 
 // Déclenche les actions à la réception d'un message
@@ -148,15 +144,9 @@ void setup() {
     delay(500);
 
     // Build MQTT client id using last Character of MAC address
-    strcat(esp,CLIENT_NAME);
+    strcat(publishing_topic,CLIENT_NAME);
     WiFi.macAddress().toCharArray(MAC_buffer,18);
-    strcat(esp, MAC_buffer+9);
-
-    // Build MQTT client id using last Character of MAC address
-    strcat(publishing_topic,esp);
-    strcat(publishing_topic, "/datas/");
-
-
+    strcat(publishing_topic, MAC_buffer+9);
 
   //  for (i=0; i<wifiAutoSelector.getCount();i++){
   //    Serial.print(wifiAutoSelector.getSSID(i));
@@ -226,9 +216,9 @@ void loop() {
     Serial.println(humi_f);
   
     //Send new temperature to MQTT broker
-    sprintf(pub_topic, "%s%s%s",publishing_topic,sensor1,"/temperature");
+    sprintf(pub_topic, "%s%s",publishing_topic,"/temperature");
     sendMQTT(pub_topic, temp_f);
-    sprintf(pub_topic, "%s%s%s",publishing_topic,sensor1,"/humidite");
+    sprintf(pub_topic, "%s%s",publishing_topic,"/humidite");
     sendMQTT(pub_topic, humi_f);
 
     last_sent = millis();
