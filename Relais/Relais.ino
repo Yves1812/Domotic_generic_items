@@ -10,11 +10,11 @@
 // 2019-05 Created by Yves Bonnefont
 // 219-05 added wifi selector
 
-#define WIFI_CONNECT_TIMEOUT 8000 // in millisec
-WiFiAutoSelector wifiAutoSelector(WIFI_CONNECT_TIMEOUT);  
-
 // Mode
 bool debug = true;  //Affiche sur la console si True
+
+#define WIFI_CONNECT_TIMEOUT 8000 // in millisec
+WiFiAutoSelector wifiAutoSelector(WIFI_CONNECT_TIMEOUT);  
 
 //AP definitions
 #define wifi_ssid_A "Home_Etage"
@@ -26,21 +26,32 @@ bool debug = true;  //Affiche sur la console si True
 #define wifi_ssid_D "Penn_Ty_Breizh"
 #define wifi_password_D "marie-pascale"
 
+// Sensors and actuators
+// sensor1 - DHT22 par défaut
+#define sensor1Pin 2     // what digital pin the DHT22 is conected to
+#define sensor1 "DHT22"
+#define sensor1Type DHT22   // there are multiple kinds of DHT sensors
+// actuator1
+#define actuator1Pin 4
+#define actuator1 "relay"
+
+// MQTT const and variables
+// MQTT HW
 #define mqtt_server "192.168.0.60"
 #define CLIENT_NAME "ESP_"
-#define sensor1 "DHT22"
 
-// DHT22
-#define DHTPIN 2     // what digital pin the DHT22 is conected to
-#define DHTTYPE DHT22   // there are multiple kinds of DHT sensors
-
-//Buffer qui permet de décoder les messages MQTT reçus
+// MQTT buffers
 char message_buff_payload[100];
+// MQTT topics
+char ESP_topic[50]; // /ESP_MAC, built in set-up
+char sensor1_topic[50]; // /ESP_MAC/datas/sensor1
+char actuator1_topic[50]; // /ESP_MAC/orders/sensor2
+//char publishing_topic[50];
+
 
 // manages periodic publish
 unsigned long last_sent = 0;
 int send_period = 600; // in seconds
-char publishing_topic[50];
 
 // Header of callback function
 void callback(char* topic, byte* payload, unsigned int length);
@@ -69,33 +80,33 @@ int setup_wifi(){
 //Connexion - Reconnexion MQTT
 void MQTTreconnect() {
   int tries = 0;
- char orders_topic[50];
+  char orders_topic[50];
   //Boucle jusqu'à obtenir une reconnexion
   Serial.print("Connexion au serveur MQTT...");
   while (!MQTTclient.connected() && tries < 5) {
     Serial.print(".");
-    if (!MQTTclient.connect(esp)) {
+    if (!MQTTclient.connect(ESP_topic)) {
       tries = tries + 1;
       delay(1000);
     }
   }
   if (tries < 5) {
     Serial.print("Connected as ");
-    Serial.println(esp);
+    Serial.println(ESP_topic);
   }
   else {
     Serial.print("KO, erreur : ");
     Serial.print(MQTTclient.state());
   }
-  // Need to improve
-  strcpy(orders_topic,esp);
-  strcat(orders_topic,"/orders/#");
   
+  // Subscribe to orders
+  strcpy(orders_topic,ESP_topic);
+  strcat(orders_topic,"/orders/#");
   MQTTclient.subscribe(orders_topic);
 }
 
 
-// Déclenche les actions à la réception d'un message
+// Déclenche les actions à la récetion d'un message
 void callback(char* topic, byte* payload, unsigned int length) {
   int i = 0;
   if ( debug ) {
@@ -112,7 +123,15 @@ void callback(char* topic, byte* payload, unsigned int length) {
   if ( debug ) {
     Serial.println("Payload: " + msgString);
   }
+
   // Any actions other than printing the message to stdout to be inserted here
+  if (strcmp(topic,actuator1_topic)==0){
+    if ( msgString == "1.0" ) {
+      digitalWrite(actuator1Pin,HIGH);
+    } else {
+      digitalWrite(actuator1Pin,LOW);
+    }
+  }
 }
 
 void sendMQTT(char *topic, float payload)
@@ -143,10 +162,21 @@ void setup() {
   if (setup_wifi()==0) {
     delay(500);
 
-    // Build MQTT client id using last Character of MAC address
-    strcat(publishing_topic,CLIENT_NAME);
-    WiFi.macAddress().toCharArray(MAC_buffer,18);
-    strcat(publishing_topic, MAC_buffer+9);
+  // Build MQTT topics
+  // ESP core topic client id using last Character of MAC address
+  strcat(ESP_topic,CLIENT_NAME);
+  WiFi.macAddress().toCharArray(MAC_buffer,18);
+  strcat(ESP_topic, MAC_buffer+9);
+    
+  // sensor1_topic
+  strcat(sensor1_topic,esp_topic);
+  strcat(sensor1_topic,"/datas/");
+  strcat(sensor1_topic,sensor1);
+
+  // actuator1_topic
+  strcat(actuator1_topic,esp_topic);
+  strcat(actuator1_topic,"/orders/");
+  strcat(actuator1_topic,actuator1);
 
   //  for (i=0; i<wifiAutoSelector.getCount();i++){
   //    Serial.print(wifiAutoSelector.getSSID(i));
