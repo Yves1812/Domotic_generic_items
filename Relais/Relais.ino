@@ -8,7 +8,8 @@
 
 // Change log
 // 2019-05 Created by Yves Bonnefont
-// 219-05 added wifi selector
+// 2019-05 added wifi selector
+// 2019-05 rewrite with sensor and actuator classes
 
 // Mode
 bool debug = true;  //Affiche sur la console si True
@@ -27,15 +28,32 @@ WiFiAutoSelector wifiAutoSelector(WIFI_CONNECT_TIMEOUT);
 #define wifi_password_D "marie-pascale"
 
 // Sensors and actuators
-// sensor1 - DHT22 par défaut
-#define sensor1Pin 2     // what digital pin the DHT22 is conected to
-#define sensor1 "DHT22"
-#define sensor1Type DHT22   // there are multiple kinds of DHT sensors
-// actuator1
-#define actuator1Pin 4
-#define actuator1 "relay"
+class Sensor {
+  public:
+    char myName[20];
+    byte myId;
+    byte myPin;
+    char myTopic[50];
+    String myType;
 
-// MQTT const and variables
+    int begin(char* Name, byte Id, byte Pin, char* Topic, String Type);
+    int senseAndPublish();
+};
+
+class Actuator {
+  public:
+    char myName[50];
+    byte myId;
+    byte myPin;
+    char myTopic[50];
+    String myType;
+
+    int begin(char* Name, byte Id, byte Pin, char* Topic, String Type);
+    int act(char* message);
+};
+
+
+// *********************************************************************** Creation of MQTT cont and objects *****************************************// 
 // MQTT HW
 #define mqtt_server "192.168.0.60"
 #define CLIENT_NAME "ESP_"
@@ -44,23 +62,84 @@ WiFiAutoSelector wifiAutoSelector(WIFI_CONNECT_TIMEOUT);
 char message_buff_payload[100];
 // MQTT topics
 char ESP_topic[50]; // /ESP_MAC, built in set-up
-char sensor1_topic[50]; // /ESP_MAC/datas/sensor1
-char actuator1_topic[50]; // /ESP_MAC/orders/sensor2
-//char publishing_topic[50];
-
-
 // manages periodic publish
 unsigned long last_sent = 0;
 int send_period = 600; // in seconds
-
 // Header of callback function
 void callback(char* topic, byte* payload, unsigned int length);
+void sendMQTT(char *topic, float payload);
 
-//Création des objets
-WiFiClient espClient;
-PubSubClient MQTTclient(mqtt_server, 1883, callback, espClient);
 
-//Connexion au réseau WiFi
+
+// ************************************************************************ Creation of top level objects ***********************************************//
+WiFiClient espClient; // Wifi client
+PubSubClient MQTTclient(mqtt_server, 1883, callback, espClient); // MQTT client
+Sensor sensors[2]; // Sensors
+Actuator actuators[2]; // Actuators
+
+
+// ************************************************************************ Classes member functions **************************************************//
+int Sensor::begin(char* Name, byte Id, byte Pin, char* Topic, String Type){
+  // create topic
+  strcpy(myName,Name);
+  myId=Id;
+  myPin=Pin;
+  strcpy(myTopic,ESP_topic);
+  strcat(myTopic,"/datas/");
+  strcat(myTopic, Topic);
+  myType=Type;
+  return 0;
+}
+
+int Sensor::senseAndPublish(void){
+  char pub_topic[50];  
+
+  if(myType=="DHT22") {
+    //read DHT
+    DHT dht(myPin, DHT22);
+    delay(200);
+    float temp_f=dht.readTemperature();
+    float humi_f= dht.readHumidity();
+    if (debug) {
+      Serial.println("Reading data");
+      Serial.print("Temperature lue: ");
+      Serial.println(temp_f);
+      Serial.print("Humidite lue: ");
+      Serial.println(humi_f);
+    }  
+    //Send data to MQTT broker
+    sprintf(pub_topic, "%s%s",myTopic,"/temperature");
+    sendMQTT(pub_topic, temp_f);
+    sprintf(pub_topic, "%s%s",myTopic,"/humidite");
+    sendMQTT(pub_topic, humi_f);
+    return 0;
+  }  
+  return -1; // sensor type has not been recogniezd in switch statment
+}
+
+int Actuator::begin(char* Name, byte Id, byte Pin, char* Topic, String Type){
+  // create topic
+  strcpy(myName,Name);
+  myId=Id;
+  myPin=Pin;
+  strcpy(myTopic,ESP_topic);
+  strcat(myTopic,"/orders/");
+  strcat(myTopic,Topic);
+  myType=Type;
+  return 0;
+}
+
+int Actuator::act(char* message){
+  if (strcmp(message,"1.0")==0) {
+    digitalWrite(myPin,HIGH);
+  } else {
+    digitalWrite(myPin,LOW);
+  }
+  return 0;
+}
+
+//*************************************************************************** Key functions *******************************************************//
+//Connexion to best known WiFi 
 int setup_wifi(){
   if(WiFi.status() != WL_CONNECTED) {
     Serial.print("Connecting wifi ");
@@ -120,16 +199,18 @@ void callback(char* topic, byte* payload, unsigned int length) {
   message_buff_payload[i] = '\0';
 
   String msgString = String(message_buff_payload);
+  String topicString = String(topic);
   if ( debug ) {
     Serial.println("Payload: " + msgString);
   }
-
   // Any actions other than printing the message to stdout to be inserted here
-  if (strcmp(topic,actuator1_topic)==0){
-    if ( msgString == "1.0" ) {
-      digitalWrite(actuator1Pin,HIGH);
-    } else {
-      digitalWrite(actuator1Pin,LOW);
+  if(debug){
+    Serial.println(sizeof(actuators)/sizeof(Actuator));
+  }
+  for (i=0; i < (sizeof(actuators)/sizeof(Actuator)) - 1; i++){
+    if(strcmp(topic,actuators[i].myTopic)==0){
+      actuators[i].act(message_buff_payload);
+      return;
     }
   }
 }
@@ -147,7 +228,6 @@ void sendMQTT(char *topic, float payload)
 }
 
 void setup() {
-  int i;
   char MAC_buffer[18];
   Serial.begin(9600);
 
@@ -157,32 +237,32 @@ void setup() {
   wifiAutoSelector.add(wifi_ssid_A, wifi_password_A);
   wifiAutoSelector.add(wifi_ssid_C, wifi_password_C);
   wifiAutoSelector.add(wifi_ssid_D, wifi_password_D);
-  
+  delay(100);
+
+  if (debug) {
+    for (int i=0; i<wifiAutoSelector.getCount();i++){
+      Serial.print(wifiAutoSelector.getSSID(i));
+      Serial.print(" ");
+      Serial.println(wifiAutoSelector.getRSSI(i));
+    }
+  }
+
   // Connect to best wifi among available
   if (setup_wifi()==0) {
     delay(500);
 
-  // Build MQTT topics
-  // ESP core topic client id using last Character of MAC address
-  strcat(ESP_topic,CLIENT_NAME);
-  WiFi.macAddress().toCharArray(MAC_buffer,18);
-  strcat(ESP_topic, MAC_buffer+9);
-    
-  // sensor1_topic
-  strcat(sensor1_topic,esp_topic);
-  strcat(sensor1_topic,"/datas/");
-  strcat(sensor1_topic,sensor1);
-
-  // actuator1_topic
-  strcat(actuator1_topic,esp_topic);
-  strcat(actuator1_topic,"/orders/");
-  strcat(actuator1_topic,actuator1);
-
-  //  for (i=0; i<wifiAutoSelector.getCount();i++){
-  //    Serial.print(wifiAutoSelector.getSSID(i));
-  //    Serial.print(" ");
-  //    Serial.println(wifiAutoSelector.getRSSI(i));
-  //  }
+    // Build MQTT topics
+    // ESP core topic client id using last Character of MAC address
+    strcat(ESP_topic,CLIENT_NAME);
+    WiFi.macAddress().toCharArray(MAC_buffer,18);
+    strcat(ESP_topic, MAC_buffer+9);
+        
+    // Create Sensors & Actuators
+    char *relay_char;
+    relay_char="relay";
+    char DHT_char[]="DHT";
+    sensors[0].begin(DHT_char,0,2,DHT_char,String("DHT22")); // name, id, pin, topic, type - known types DHT22, DS18B20
+    actuators[0].begin(relay_char,0,4,relay_char,String("relay")); // name, id, pin, topic, type - known types relay
 
     // Connect to MQTT broker
     MQTTclient.setServer(mqtt_server, 1883);    //Configuration de la connexion au serveur MQTT
@@ -202,8 +282,8 @@ void setup() {
 
   }
   else {
-    Serial.println("Unable to connect to a known wifi network");
     // blink failure
+    Serial.println("Unable to connect to a known wifi network");
     pinMode(LED_BUILTIN, OUTPUT);
     while (true){
       digitalWrite(LED_BUILTIN, LOW);   // turn the LED on (HIGH is the voltage level)
@@ -219,9 +299,7 @@ void setup() {
 }
 
 void loop() {
-  char pub_topic[50];
-  float temp_f, humi_f;
-
+  int i;
   // If publish interval is completed
   if (millis() - last_sent > send_period * 1000)
   {
@@ -233,24 +311,10 @@ void loop() {
     if (!MQTTclient.connected()) {
       MQTTreconnect();
     }
-
-    //read DHT
-    DHT dht(DHTPIN, DHTTYPE);
-    Serial.println("Reading data");
-    // Read current temperature
-    temp_f=dht.readTemperature();
-    humi_f= dht.readHumidity();
-    Serial.print("Temperature lue: ");
-    Serial.println(temp_f);
-    Serial.print("Humidite lue: ");
-    Serial.println(humi_f);
-  
-    //Send new temperature to MQTT broker
-    sprintf(pub_topic, "%s%s",publishing_topic,"/temperature");
-    sendMQTT(pub_topic, temp_f);
-    sprintf(pub_topic, "%s%s",publishing_topic,"/humidite");
-    sendMQTT(pub_topic, humi_f);
-
+    // sense and publish all available sensors
+for (i=0; i< (sizeof(sensors)/sizeof(Sensor)); i++){
+      sensors[i].senseAndPublish();
+    }
     last_sent = millis();
   }
   if (last_sent > millis()) { // means millis has been reset => reset last_sent
