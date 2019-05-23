@@ -2,6 +2,8 @@
 
 #include <ESP8266WiFi.h>
 #include <DHT.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
 #include <PubSubClient.h>
 #include <Wifi_selector.h>
 
@@ -53,6 +55,8 @@ class Actuator {
 };
 
 
+float read_ds18B20(int);
+
 // *********************************************************************** Creation of MQTT const and objects *****************************************// 
 // MQTT HW
 #define mqtt_server "192.168.0.60"
@@ -64,7 +68,7 @@ char message_buff_payload[100];
 char ESP_topic[50]; // /ESP_MAC, built in set-up
 // manages periodic publish
 unsigned long last_sent = 0;
-int send_period = 600; // in seconds
+int send_period = 30; // in seconds
 // Header of callback function
 void callback(char* topic, byte* payload, unsigned int length);
 void sendMQTT(char *topic, float payload);
@@ -92,8 +96,9 @@ int Sensor::begin(char* Name, byte Id, byte Pin, char* Topic, String Type){
 }
 
 int Sensor::senseAndPublish(void){
-  char pub_topic[6];  
-
+  char pub_topic[80];
+  
+  Serial.print(myType);
   if(myType=="DHT22") {
     //read DHT
     DHT dht(myPin, DHT22);
@@ -113,7 +118,12 @@ int Sensor::senseAndPublish(void){
     sprintf(pub_topic, "%s%s",myTopic,"/humidite");
     sendMQTT(pub_topic, humi_f);
     return 0;
-  }  
+  }
+  if(myType=="DS18B20") {
+    sprintf(pub_topic, "%s%s",myTopic,"/temperature");
+    sendMQTT(pub_topic, read_ds18B20 (myPin));
+    return 0;
+  }
   return -1; // sensor type has not been recogniezd in switch statment
 }
 
@@ -194,7 +204,8 @@ void callback(char* topic, byte* payload, unsigned int length) {
   int i = 0;
   if ( debug ) {
     Serial.println("Message recu =>  topic: " + String(topic));
-    Serial.print(" | longueur: " + String(length, DEC));
+    Serial.print(length);
+    Serial.println(" | longueur: " + String(length, DEC));
   }
   // create character buffer with ending null terminator (string)
   for (i = 0; i < length; i++) {
@@ -225,15 +236,18 @@ void sendMQTT(char *topic, float payload)
   char* message;
 
   message = dtostrf(payload, 3, 1, message_buffer); //
-  Serial.print(topic);
-  Serial.print(": ");
-  Serial.println(message);
+  if (debug){
+    Serial.print(topic);
+    Serial.print(": ");
+    Serial.println(message);
+  }
   Serial.println(MQTTclient.publish(topic, message));
 }
 
 void setup() {
   char MAC_buffer[18];
   Serial.begin(9600);
+  Serial.println("Going through set-up process");
 
   // Start the Ethernet connection
   // List known wifi
@@ -262,8 +276,10 @@ void setup() {
     strcat(ESP_topic, MAC_buffer+9);
         
     // Create Sensors & Actuators
-    sensors[0].begin("DHT",0,2,"DHT",String("DHT22")); // name, id, pin, topic, type - known types DHT22, DS18B20
-    actuators[0].begin("relay",0,4,"relay",String("relay")); // name, id, pin, topic, type - known types relay
+    sensors[0].begin("DHT",0,4,"DHT",String("DHT22")); // name, id, pin, topic, type - known types DHT22, DS18B20
+    //sensors[1].begin("DS18B20",1,2,"DS18B20",String("DS18B20")); // name, id, pin, topic, type - known types DHT22, DS18B20
+
+    actuators[0].begin("relay",0,16,"relay",String("relay")); // name, id, pin, topic, type - known types relay
 
     // Connect to MQTT broker
     MQTTclient.setServer(mqtt_server, 1883);    //Configuration de la connexion au serveur MQTT
@@ -306,15 +322,26 @@ void loop() {
   {
     // reconnect to wifi if needed to correct for HW errors
     if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("Reconnecting to Wifi ater drop");
       setup_wifi();
     }
     // Reconnect to MQTT broker and re-subscribe
     if (!MQTTclient.connected()) {
+      Serial.println("Reconnecting MQTT after drop");
       MQTTreconnect();
     }
     // sense and publish all available sensors
-    for (i=0; i< (sizeof(sensors)/sizeof(Sensor)); i++){
-      sensors[i].senseAndPublish();
+    for (i=0; i<(sizeof(sensors)/sizeof(Sensor)); i++){
+      Serial.print("Working sensor #: ");
+      Serial.println(i);
+      if (sensors[i].senseAndPublish()==0){
+        Serial.print("Sensor ");
+        Serial.print(i);
+        Serial.println(" published.");
+      }
+      else {
+        Serial.println("Sensor not recognized");
+      }
     }
     last_sent = millis();
   }
@@ -322,4 +349,21 @@ void loop() {
     last_sent = millis();
   }
   MQTTclient.loop();
+}
+
+
+/*********************************** Sensors code *********************************/
+
+/* DS18B20 on one_wire bus*/
+float read_ds18B20 (int oneWirePin){
+  float temptemp;
+  OneWire oneWire(oneWirePin);
+  DallasTemperature sensors(&oneWire);
+  do {
+  sensors.requestTemperatures(); // Send the command to get temperatures
+  temptemp = sensors.getTempCByIndex(0);
+  Serial.print("Temperature: ");
+  Serial.println(temptemp);
+  } while (temptemp == 85.0 || temptemp == (-127.0));
+  return temptemp;
 }
