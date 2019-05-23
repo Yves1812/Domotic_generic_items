@@ -53,7 +53,7 @@ class Actuator {
 };
 
 
-// *********************************************************************** Creation of MQTT cont and objects *****************************************// 
+// *********************************************************************** Creation of MQTT const and objects *****************************************// 
 // MQTT HW
 #define mqtt_server "192.168.0.60"
 #define CLIENT_NAME "ESP_"
@@ -92,7 +92,7 @@ int Sensor::begin(char* Name, byte Id, byte Pin, char* Topic, String Type){
 }
 
 int Sensor::senseAndPublish(void){
-  char pub_topic[50];  
+  char pub_topic[6];  
 
   if(myType=="DHT22") {
     //read DHT
@@ -130,12 +130,16 @@ int Actuator::begin(char* Name, byte Id, byte Pin, char* Topic, String Type){
 }
 
 int Actuator::act(char* message){
-  if (strcmp(message,"1.0")==0) {
-    digitalWrite(myPin,HIGH);
-  } else {
-    digitalWrite(myPin,LOW);
+  if(myType=="relay") {
+    if (strcmp(message,"1.0")==0) {
+      digitalWrite(myPin,HIGH);
+    } else {
+      digitalWrite(myPin,LOW);
+    }
+    return 0;
   }
-  return 0;
+  return -1; // sensor type has not been recogniezd in switch statment
+
 }
 
 //*************************************************************************** Key functions *******************************************************//
@@ -258,11 +262,8 @@ void setup() {
     strcat(ESP_topic, MAC_buffer+9);
         
     // Create Sensors & Actuators
-    char *relay_char;
-    relay_char="relay";
-    char DHT_char[]="DHT";
-    sensors[0].begin(DHT_char,0,2,DHT_char,String("DHT22")); // name, id, pin, topic, type - known types DHT22, DS18B20
-    actuators[0].begin(relay_char,0,4,relay_char,String("relay")); // name, id, pin, topic, type - known types relay
+    sensors[0].begin("DHT",0,2,"DHT",String("DHT22")); // name, id, pin, topic, type - known types DHT22, DS18B20
+    actuators[0].begin("relay",0,4,"relay",String("relay")); // name, id, pin, topic, type - known types relay
 
     // Connect to MQTT broker
     MQTTclient.setServer(mqtt_server, 1883);    //Configuration de la connexion au serveur MQTT
@@ -312,7 +313,7 @@ void loop() {
       MQTTreconnect();
     }
     // sense and publish all available sensors
-for (i=0; i< (sizeof(sensors)/sizeof(Sensor)); i++){
+    for (i=0; i< (sizeof(sensors)/sizeof(Sensor)); i++){
       sensors[i].senseAndPublish();
     }
     last_sent = millis();
