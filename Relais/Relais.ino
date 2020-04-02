@@ -5,10 +5,10 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <PubSubClient.h>
-#include <WifiAutoSelector.h>
 #include <ESP8266mDNS.h>
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
+#include "WifiAutoSelector.h"
 
 
 // Change log
@@ -381,7 +381,7 @@ void setup() {
     }
   });
   ArduinoOTA.begin();
-  Serial.println("Ready");
+  Serial.println("OTA ready");
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
 
