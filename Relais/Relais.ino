@@ -236,10 +236,14 @@ void MQTTreconnect() {
   if (tries < 5) {
     Serial.print("Connected as ");
     Serial.println(ESP_topic);
-    // Subscribe to orders
+    // Subscribe to orders and system
     strcpy(orders_topic,ESP_topic);
     strcat(orders_topic,"/orders/#");
     MQTTclient.subscribe(orders_topic);
+    strcpy(orders_topic,ESP_topic);
+    strcat(orders_topic,"/system/#");
+    MQTTclient.subscribe(orders_topic);
+
   }
   else {
     Serial.print("KO, erreur : ");
@@ -248,7 +252,7 @@ void MQTTreconnect() {
 }
 
 
-// Déclenche les actions à la récetion d'un message
+// Déclenche les actions à la réception d'un message
 void callback(char* topic, byte* payload, unsigned int length) {
   int i = 0;
   char period_topic[50];
@@ -281,9 +285,11 @@ void callback(char* topic, byte* payload, unsigned int length) {
     }
   }
   strcpy(period_topic, ESP_topic);
-  strcat(period_topic,"/period/");   
+  strcat(period_topic,"/system/period/");   
   if(strcmp(topic,period_topic)==0){
     send_period=msgString.toInt();
+    strcpy(period_topic, ESP_topic);
+    strcat(period_topic,"/system/period_updated/");   
     sendMQTT(period_topic,float(send_period));
   }
 }
@@ -391,6 +397,8 @@ void loop() {
   int i;
 
   ArduinoOTA.handle();
+  MQTTclient.loop();
+
   // If publish interval is completed
   if (millis() - last_sent > send_period * 1000)
   {
@@ -422,7 +430,6 @@ void loop() {
   if (last_sent > millis()) { // means millis has been reset => reset last_sent
     last_sent = millis();
   }
-  MQTTclient.loop();
 }
 
 
