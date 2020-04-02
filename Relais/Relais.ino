@@ -5,13 +5,18 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <PubSubClient.h>
-#include <Wifi_selector.h>
+#include <WifiAutoSelector.h>
+#include <ESP8266mDNS.h>
+#include <WiFiUdp.h>
+#include <ArduinoOTA.h>
 
 
 // Change log
 // 2019-05 Created by Yves Bonnefont
 // 2019-05 added wifi selector
 // 2019-05 rewrite with sensor and actuator classes
+// 2019-09 added regular retry to select best network
+// 2020-03 added option to adjust sensor send period by sending an int to topic period
 
 // Mode
 bool debug = true;  //Affiche sur la console si True
@@ -28,6 +33,9 @@ WiFiAutoSelector wifiAutoSelector(WIFI_CONNECT_TIMEOUT);
 #define wifi_password_C "laclancheuse"
 #define wifi_ssid_D "Penn_Ty_Breizh"
 #define wifi_password_D "marie-pascale"
+#define wifi_ssid_E "laclancheuse_outdoor"
+#define wifi_password_E "laclancheuse"
+
 
 // Sensors and actuators
 class Sensor {
@@ -92,6 +100,7 @@ int Sensor::begin(char* Name, byte Id, byte Pin, char* Topic, String Type){
   strcat(myTopic,"/datas/");
   strcat(myTopic, Topic);
   myType=Type;
+  pinMode(myPin, INPUT_PULLUP); // set as input - with pullup
   return 0;
 }
 
@@ -136,6 +145,7 @@ int Actuator::begin(char* Name, byte Id, byte Pin, char* Topic, String Type){
   strcat(myTopic,"/orders/");
   strcat(myTopic,Topic);
   myType=Type;
+  pinMode(myPin, OUTPUT);
   return 0;
 }
 
@@ -148,7 +158,15 @@ int Actuator::act(char* message){
     }
     return 0;
   }
-  return -1; // sensor type has not been recogniezd in switch statment
+  if(myType=="LED") {
+    if (strcmp(message,"1.0")==0) {
+      digitalWrite(myPin,LOW);
+    } else {
+      digitalWrite(myPin,HIGH);
+    }
+    return 0;
+  }
+  return -1; // actuator type has not been recogniezd in switch statment
 
 }
 
@@ -157,18 +175,50 @@ int Actuator::act(char* message){
 int setup_wifi(){
   if(WiFi.status() != WL_CONNECTED) {
     Serial.print("Connecting wifi ");
+    if (debug) {
+      for (int i=0; i<wifiAutoSelector.getCount();i++){
+        Serial.print(wifiAutoSelector.getSSID(i));
+        Serial.print(" ");
+        Serial.println(wifiAutoSelector.getRSSI(i));
+      }
+    }
     if(-1 < wifiAutoSelector.scanAndConnect()) {
       int connectedIndex = wifiAutoSelector.getConnectedIndex();
       Serial.print("to '");
       Serial.print(wifiAutoSelector.getSSID(connectedIndex));
       Serial.println("'. Done.");
+  
+      // Blink success
+      pinMode(LED_BUILTIN, OUTPUT);
+      digitalWrite(LED_BUILTIN, LOW);   // turn the LED on (HIGH is the voltage level)
+      delay(500);                       // wait for a second
+      digitalWrite(LED_BUILTIN, HIGH);    // turn the LED off by making the voltage LOW
+      delay(500);                       // wait for a second
+      digitalWrite(LED_BUILTIN, LOW);   // turn the LED on (HIGH is the voltage level)
+      delay(500);                       // wait for a second
+      digitalWrite(LED_BUILTIN, HIGH);    // turn the LED off by making the voltage LOW      
       return 0;
-    }else{
-      Serial.println("failed.");
+    }
+    else
+    {
+      // blink failure
+      Serial.println("Unable to connect to a known wifi network");
+      pinMode(LED_BUILTIN, OUTPUT);
+      for (int i=0;i<10;i++){
+        digitalWrite(LED_BUILTIN, LOW);   // turn the LED on (HIGH is the voltage level)
+        delay(100);                       // wait for a second
+        digitalWrite(LED_BUILTIN, HIGH);    // turn the LED off by making the voltage LOW
+        delay(250);                       // wait for a second
+        digitalWrite(LED_BUILTIN, LOW);   // turn the LED on (HIGH is the voltage level)
+        delay(100);                       // wait for a second
+        digitalWrite(LED_BUILTIN, HIGH);    // turn the LED off by making the voltage LOW
+        delay(500);                       // wait for a second
+      }
       return -1;
     }
   }
 }
+
 
 //Connexion - Reconnexion MQTT
 void MQTTreconnect() {
@@ -186,22 +236,23 @@ void MQTTreconnect() {
   if (tries < 5) {
     Serial.print("Connected as ");
     Serial.println(ESP_topic);
+    // Subscribe to orders
+    strcpy(orders_topic,ESP_topic);
+    strcat(orders_topic,"/orders/#");
+    MQTTclient.subscribe(orders_topic);
   }
   else {
     Serial.print("KO, erreur : ");
     Serial.print(MQTTclient.state());
-  }
-  
-  // Subscribe to orders
-  strcpy(orders_topic,ESP_topic);
-  strcat(orders_topic,"/orders/#");
-  MQTTclient.subscribe(orders_topic);
+  }  
 }
 
 
 // Déclenche les actions à la récetion d'un message
 void callback(char* topic, byte* payload, unsigned int length) {
   int i = 0;
+  char period_topic[50];
+
   if ( debug ) {
     Serial.println("Message recu =>  topic: " + String(topic));
     Serial.print(length);
@@ -222,11 +273,18 @@ void callback(char* topic, byte* payload, unsigned int length) {
   if(debug){
     Serial.println(sizeof(actuators)/sizeof(Actuator));
   }
-  for (i=0; i < (sizeof(actuators)/sizeof(Actuator)) - 1; i++){
+  
+  for (i=0; i < (sizeof(actuators)/sizeof(Actuator)); i++){
     if(strcmp(topic,actuators[i].myTopic)==0){
       actuators[i].act(message_buff_payload);
       return;
     }
+  }
+  strcpy(period_topic, ESP_topic);
+  strcat(period_topic,"/period/");   
+  if(strcmp(topic,period_topic)==0){
+    send_period=msgString.toInt();
+    sendMQTT(period_topic,float(send_period));
   }
 }
 
@@ -240,8 +298,11 @@ void sendMQTT(char *topic, float payload)
     Serial.print(topic);
     Serial.print(": ");
     Serial.println(message);
+    Serial.println(MQTTclient.publish(topic, message));
   }
-  Serial.println(MQTTclient.publish(topic, message));
+  else {
+    MQTTclient.publish(topic, message);
+  }
 }
 
 void setup() {
@@ -249,74 +310,87 @@ void setup() {
   Serial.begin(9600);
   Serial.println("Going through set-up process");
 
-  // Start the Ethernet connection
   // List known wifi
   wifiAutoSelector.add(wifi_ssid_B, wifi_password_B);
   wifiAutoSelector.add(wifi_ssid_A, wifi_password_A);
   wifiAutoSelector.add(wifi_ssid_C, wifi_password_C);
   wifiAutoSelector.add(wifi_ssid_D, wifi_password_D);
-  delay(100);
+  wifiAutoSelector.add(wifi_ssid_E, wifi_password_E);
 
-  if (debug) {
-    for (int i=0; i<wifiAutoSelector.getCount();i++){
-      Serial.print(wifiAutoSelector.getSSID(i));
-      Serial.print(" ");
-      Serial.println(wifiAutoSelector.getRSSI(i));
-    }
-  }
+  WiFi.mode(WIFI_STA); // Set ESP to client mode
+
+
+  // Build MQTT topics
+  // ESP core topic client id using last Character of MAC address
+  strcat(ESP_topic,CLIENT_NAME);
+  WiFi.macAddress().toCharArray(MAC_buffer,18);
+  strcat(ESP_topic, MAC_buffer+9);
+  // set MQTT parameters
+  MQTTclient.setServer(mqtt_server, 1883);    //Configuration de la connexion au serveur MQTT
+  MQTTclient.setCallback(callback);  //La fonction de callback qui est executée à chaque réception de message
+
+  // Create Sensors & Actuators
+  sensors[0].begin("DHT",0,2,"DHT",String("DHT22")); // name, id, pin, topic, type - known types DHT22, DS18B20
+  //sensors[1].begin("DS18B20",1,2,"DS18B20",String("DS18B20")); // name, id, pin, topic, type - known types DHT22, DS18B20
+  //actuators[0].begin("relay",0,12,"relay",String("relay")); // name, id, pin, topic, type - known types relay, LED
+  //actuators[1].begin("LED",0,13,"LED",String("LED")); // name, id, pin, topic, type - known types relay, LED
+
+  // on a SonOff, relay = pin 12, led = pin 13, button = pin 0
+
 
   // Connect to best wifi among available
-  if (setup_wifi()==0) {
-    delay(500);
-
-    // Build MQTT topics
-    // ESP core topic client id using last Character of MAC address
-    strcat(ESP_topic,CLIENT_NAME);
-    WiFi.macAddress().toCharArray(MAC_buffer,18);
-    strcat(ESP_topic, MAC_buffer+9);
-        
-    // Create Sensors & Actuators
-    sensors[0].begin("DHT",0,4,"DHT",String("DHT22")); // name, id, pin, topic, type - known types DHT22, DS18B20
-    //sensors[1].begin("DS18B20",1,2,"DS18B20",String("DS18B20")); // name, id, pin, topic, type - known types DHT22, DS18B20
-
-    actuators[0].begin("relay",0,16,"relay",String("relay")); // name, id, pin, topic, type - known types relay
-
-    // Connect to MQTT broker
-    MQTTclient.setServer(mqtt_server, 1883);    //Configuration de la connexion au serveur MQTT
-    MQTTclient.setCallback(callback);  //La fonction de callback qui est executée à chaque réception de message
-    MQTTreconnect();
-    MQTTclient.loop();
-
-    // Blink success
-    pinMode(LED_BUILTIN, OUTPUT);
-    digitalWrite(LED_BUILTIN, LOW);   // turn the LED on (HIGH is the voltage level)
-    delay(500);                       // wait for a second
-    digitalWrite(LED_BUILTIN, HIGH);    // turn the LED off by making the voltage LOW
-    delay(500);                       // wait for a second
-    digitalWrite(LED_BUILTIN, LOW);   // turn the LED on (HIGH is the voltage level)
-    delay(500);                       // wait for a second
-    digitalWrite(LED_BUILTIN, HIGH);    // turn the LED off by making the voltage LOW
-
+  if (setup_wifi()==0){
+      MQTTreconnect();
+      MQTTclient.loop();
   }
-  else {
-    // blink failure
-    Serial.println("Unable to connect to a known wifi network");
-    pinMode(LED_BUILTIN, OUTPUT);
-    while (true){
-      digitalWrite(LED_BUILTIN, LOW);   // turn the LED on (HIGH is the voltage level)
-      delay(100);                       // wait for a second
-      digitalWrite(LED_BUILTIN, HIGH);    // turn the LED off by making the voltage LOW
-      delay(250);                       // wait for a second
-      digitalWrite(LED_BUILTIN, LOW);   // turn the LED on (HIGH is the voltage level)
-      delay(100);                       // wait for a second
-      digitalWrite(LED_BUILTIN, HIGH);    // turn the LED off by making the voltage LOW
-      delay(500);                       // wait for a second
+  else
+  {
+    delay(5000);
+    ESP.restart();
+  }
+
+    ArduinoOTA.onStart([]() {
+    String type;
+    if (ArduinoOTA.getCommand() == U_FLASH) {
+      type = "sketch";
+    } else { // U_FS
+      type = "filesystem";
     }
-  }
+
+    // NOTE: if updating FS this would be the place to unmount FS using FS.end()
+    Serial.println("Start updating " + type);
+  });
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\nEnd");
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) {
+      Serial.println("Auth Failed");
+    } else if (error == OTA_BEGIN_ERROR) {
+      Serial.println("Begin Failed");
+    } else if (error == OTA_CONNECT_ERROR) {
+      Serial.println("Connect Failed");
+    } else if (error == OTA_RECEIVE_ERROR) {
+      Serial.println("Receive Failed");
+    } else if (error == OTA_END_ERROR) {
+      Serial.println("End Failed");
+    }
+  });
+  ArduinoOTA.begin();
+  Serial.println("Ready");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+
 }
 
 void loop() {
   int i;
+
+  ArduinoOTA.handle();
   // If publish interval is completed
   if (millis() - last_sent > send_period * 1000)
   {
