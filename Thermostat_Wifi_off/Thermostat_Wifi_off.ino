@@ -16,7 +16,11 @@
 // 2019-05 added wifi selector
 // 2019-05 rewrite with sensor and actuator classes
 // 2019-09 added regular retry to select best network
-// 2020-03 added option to adjust sensor send period by sending an int to topic /system/period
+// 2020-03 added option to adjust sensor send period by sending an int to topic period
+// 2020-04 added OTA, added actuator::sendStatus
+
+// To do - Need to adjsut dynamically the number of sensors/ actuators, today set at 2 each
+
 
 // Mode
 bool debug = true;  //Affiche sur la console si True
@@ -60,6 +64,7 @@ class Actuator {
 
     int begin(char* Name, byte Id, byte Pin, char* Topic, String Type);
     int act(char* message);
+    int sendStatus(void);
 };
 
 
@@ -76,7 +81,7 @@ char message_buff_payload[100];
 char ESP_topic[50]; // /ESP_MAC, built in set-up
 // manages periodic publish
 unsigned long last_sent = 0;
-int send_period = 30; // in seconds
+int send_period = 10; // in seconds
 // Header of callback function
 void callback(char* topic, byte* payload, unsigned int length);
 void sendMQTT(char *topic, float payload);
@@ -111,7 +116,7 @@ int Sensor::senseAndPublish(void){
     //read DHT
     DHT dht(myPin, DHT22);
     dht.begin();
-    delay(300);
+    delay(200);
     float temp_f=dht.readTemperature();
     float humi_f= dht.readHumidity();
     if (debug) {
@@ -150,34 +155,58 @@ int Actuator::begin(char* Name, byte Id, byte Pin, char* Topic, String Type){
 }
 
 int Actuator::act(char* message){
+  char pub_topic[80];
+
+  sprintf(pub_topic, "%s%s",myTopic,"/status");
   if(myType=="relay") {
     if (strcmp(message,"1.0")==0) {
       digitalWrite(myPin,HIGH);
+      sendMQTT(pub_topic,1.0);
     } else {
       digitalWrite(myPin,LOW);
+      sendMQTT(pub_topic,0.0);
     }
     return 0;
   }
   if(myType=="LED") {
     if (strcmp(message,"1.0")==0) {
       digitalWrite(myPin,LOW);
+      sendMQTT(pub_topic,1.0);
     } else {
       digitalWrite(myPin,HIGH);
+      sendMQTT(pub_topic,0.0);
     }
     return 0;
   }
   return -1; // actuator type has not been recogniezd in switch statment
-
 }
 
+int Actuator::sendStatus(void){
+  byte pin_status;
+  char pub_topic[80];
+
+  sprintf(pub_topic, "%s%s",myTopic,"/status");
+  pin_status=digitalRead(myPin);
+  if(myType=="relay") {
+    sendMQTT(pub_topic,(float) (pin_status));
+    return 0;
+  }
+  if(myType=="LED") {
+    sendMQTT(pub_topic,1.0-(float) (pin_status));
+    return 0;
+  }
+  return -1;
+}
 //*************************************************************************** Key functions *******************************************************//
 //Connexion to best known WiFi 
 int setup_wifi(){
+  WiFi.mode(WIFI_STA); // Set ESP to client mode
   if(WiFi.status() != WL_CONNECTED) {
     Serial.print("Connecting wifi ");
     if (debug) {
       for (int i=0; i<wifiAutoSelector.getCount();i++){
         Serial.print(wifiAutoSelector.getSSID(i));
+        delay(100);
         Serial.print(" ");
         Serial.println(wifiAutoSelector.getRSSI(i));
       }
@@ -309,6 +338,7 @@ void sendMQTT(char *topic, float payload)
   else {
     MQTTclient.publish(topic, message);
   }
+  MQTTclient.loop();
 }
 
 void setup() {
@@ -317,8 +347,8 @@ void setup() {
   Serial.println("Going through set-up process");
 
   // List known wifi
-  wifiAutoSelector.add(wifi_ssid_B, wifi_password_B);
   wifiAutoSelector.add(wifi_ssid_A, wifi_password_A);
+  wifiAutoSelector.add(wifi_ssid_B, wifi_password_B);
   wifiAutoSelector.add(wifi_ssid_C, wifi_password_C);
   wifiAutoSelector.add(wifi_ssid_D, wifi_password_D);
   wifiAutoSelector.add(wifi_ssid_E, wifi_password_E);
@@ -330,16 +360,18 @@ void setup() {
   // ESP core topic client id using last Character of MAC address
   strcat(ESP_topic,CLIENT_NAME);
   WiFi.macAddress().toCharArray(MAC_buffer,18);
+  WiFi.setSleepMode (WIFI_MODEM_SLEEP, 10); // Save power if connection is established but not used (delay in loop required!)
+
   strcat(ESP_topic, MAC_buffer+9);
   // set MQTT parameters
   MQTTclient.setServer(mqtt_server, 1883);    //Configuration de la connexion au serveur MQTT
   MQTTclient.setCallback(callback);  //La fonction de callback qui est executée à chaque réception de message
 
   // Create Sensors & Actuators
-  sensors[0].begin("DHT",0,2,"DHT",String("DHT22")); // name, id, pin, topic, type - known types DHT22, DS18B20
-  //sensors[1].begin("DS18B20",1,2,"DS18B20",String("DS18B20")); // name, id, pin, topic, type - known types DHT22, DS18B20
-  //actuators[0].begin("relay",0,12,"relay",String("relay")); // name, id, pin, topic, type - known types relay, LED
-  //actuators[1].begin("LED",0,13,"LED",String("LED")); // name, id, pin, topic, type - known types relay, LED
+  sensors[0].begin("DHT22",0,4,"DHT22",String("DHT22")); // name, id, pin, topic, type - known types DHT22, DS18B20
+  //sensors[0].begin("DS18B20",0,4,"DS18B20",String("DS18B20")); // name, id, pin, topic, type - known types DHT22, DS18B20
+  //actuators[0].begin("Circulateur",0,14,"circulateur",String("relay")); // name, id, pin, topic, type - known types relay, LED - used relay so that 0 = no heating
+  //actuators[1].begin("Vanne_eau",1,16,"vanne_eau",String("LED")); // name, id, pin, topic, type - known types relay, LED - used LED so that 0 = no heating
 
   // on a SonOff, relay = pin 12, led = pin 13, button = pin 0
 
@@ -348,6 +380,13 @@ void setup() {
       MQTTreconnect();
       MQTTclient.loop();
   }
+  else
+  {
+    delay(5000);
+    ESP.restart();
+  }
+
+
 }
 
 void loop() {
@@ -356,9 +395,10 @@ void loop() {
   // If publish interval is completed
   if (millis() - last_sent > send_period * 1000)
   {
+    WiFi.mode(WIFI_STA); // Set ESP to client mode
     // reconnect to wifi if needed to correct for HW errors
     if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("Reconnecting to Wifi after drop");
+      Serial.println("Reconnecting to Wifi ater drop");
       setup_wifi();
     }
     // Reconnect to MQTT broker and re-subscribe
@@ -366,6 +406,8 @@ void loop() {
       Serial.println("Reconnecting MQTT after drop");
       MQTTreconnect();
     }
+    MQTTclient.loop();
+
     // sense and publish all available sensors
     for (i=0; i<(sizeof(sensors)/sizeof(Sensor)); i++){
       Serial.print("Working sensor #: ");
@@ -379,13 +421,30 @@ void loop() {
         Serial.println("Sensor not recognized");
       }
     }
+    // publish all available actuators status
+    for (i=0; i<(sizeof(actuators)/sizeof(Actuator)); i++){
+      Serial.print("Working actuator #: ");
+      Serial.println(i);
+      if (actuators[i].sendStatus()==0){
+        Serial.print("Actuator ");
+        Serial.print(i);
+        Serial.println(" published.");
+      }
+      else {
+        Serial.println("Actuator not recognized");
+      }
+    }
     last_sent = millis();
+    WiFi.disconnect (); // STOP!
+    delay(100);
+    WiFi.mode (WIFI_OFF); // Required to make forceSleepBegin work
+    delay(100);
+    WiFi.forceSleepBegin (); // Turns current down permanently to <20mA (needs delay in loop, too)
+    
   }
   if (last_sent > millis()) { // means millis has been reset => reset last_sent
     last_sent = millis();
   }
-  MQTTclient.loop();
-
 }
 
 

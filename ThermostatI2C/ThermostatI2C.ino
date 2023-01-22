@@ -9,6 +9,9 @@
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
 #include "WifiAutoSelector.h"
+#include <Wire.h>
+#include "Adafruit_SHT31.h"
+
 
 
 // Change log
@@ -16,7 +19,13 @@
 // 2019-05 added wifi selector
 // 2019-05 rewrite with sensor and actuator classes
 // 2019-09 added regular retry to select best network
-// 2020-03 added option to adjust sensor send period by sending an int to topic /system/period
+// 2020-03 added option to adjust sensor send period by sending an int to topic period
+// 2020-04 added OTA, added actuator::sendStatus
+// 2020-06 added SHT31 sensor
+// 2020-08 added button sensor
+
+// To do - Need to adjsut dynamically the number of sensors/ actuators, today set at 2 each
+
 
 // Mode
 bool debug = true;  //Affiche sur la console si True
@@ -60,10 +69,12 @@ class Actuator {
 
     int begin(char* Name, byte Id, byte Pin, char* Topic, String Type);
     int act(char* message);
+    int sendStatus(void);
 };
 
 
 float read_ds18B20(int);
+int read_button(int);
 
 // *********************************************************************** Creation of MQTT const and objects *****************************************// 
 // MQTT HW
@@ -111,9 +122,32 @@ int Sensor::senseAndPublish(void){
     //read DHT
     DHT dht(myPin, DHT22);
     dht.begin();
-    delay(300);
+    delay(200);
     float temp_f=dht.readTemperature();
     float humi_f= dht.readHumidity();
+    if (debug) {
+      Serial.println("Reading data");
+      Serial.print("Temperature lue: ");
+      Serial.println(temp_f);
+      Serial.print("Humidite lue: ");
+      Serial.println(humi_f);
+    }  
+    //Send data to MQTT broker
+    sprintf(pub_topic, "%s%s",myTopic,"/temperature");
+    sendMQTT(pub_topic, temp_f);
+    sprintf(pub_topic, "%s%s",myTopic,"/humidite");
+    sendMQTT(pub_topic, humi_f);
+    return 0;
+  }
+  if(myType=="SHT31") {
+    //read SHT
+    Adafruit_SHT31 sht31 = Adafruit_SHT31();
+    if (! sht31.begin(0x44)) 
+    {
+        Serial.println("Couldn't find SHT31");
+    }
+    float temp_f = sht31.readTemperature();
+    float humi_f = sht31.readHumidity();
     if (debug) {
       Serial.println("Reading data");
       Serial.print("Temperature lue: ");
@@ -133,6 +167,12 @@ int Sensor::senseAndPublish(void){
     sendMQTT(pub_topic, read_ds18B20 (myPin));
     return 0;
   }
+  if(myType=="button") {
+    sprintf(pub_topic, "%s%s",myTopic,"/state");
+    sendMQTT(pub_topic, read_button(myPin));
+    return 0;
+  }
+
   return -1; // sensor type has not been recogniezd in switch statment
 }
 
@@ -150,26 +190,48 @@ int Actuator::begin(char* Name, byte Id, byte Pin, char* Topic, String Type){
 }
 
 int Actuator::act(char* message){
+  char pub_topic[80];
+
+  sprintf(pub_topic, "%s%s",myTopic,"/status");
   if(myType=="relay") {
     if (strcmp(message,"1.0")==0) {
       digitalWrite(myPin,HIGH);
+      sendMQTT(pub_topic,1.0);
     } else {
       digitalWrite(myPin,LOW);
+      sendMQTT(pub_topic,0.0);
     }
     return 0;
   }
   if(myType=="LED") {
     if (strcmp(message,"1.0")==0) {
       digitalWrite(myPin,LOW);
+      sendMQTT(pub_topic,1.0);
     } else {
       digitalWrite(myPin,HIGH);
+      sendMQTT(pub_topic,0.0);
     }
     return 0;
   }
   return -1; // actuator type has not been recogniezd in switch statment
-
 }
 
+int Actuator::sendStatus(void){
+  byte pin_status;
+  char pub_topic[80];
+
+  sprintf(pub_topic, "%s%s",myTopic,"/status");
+  pin_status=digitalRead(myPin);
+  if(myType=="relay") {
+    sendMQTT(pub_topic,(float) (pin_status));
+    return 0;
+  }
+  if(myType=="LED") {
+    sendMQTT(pub_topic,1.0-(float) (pin_status));
+    return 0;
+  }
+  return -1;
+}
 //*************************************************************************** Key functions *******************************************************//
 //Connexion to best known WiFi 
 int setup_wifi(){
@@ -178,6 +240,7 @@ int setup_wifi(){
     if (debug) {
       for (int i=0; i<wifiAutoSelector.getCount();i++){
         Serial.print(wifiAutoSelector.getSSID(i));
+        delay(100);
         Serial.print(" ");
         Serial.println(wifiAutoSelector.getRSSI(i));
       }
@@ -317,8 +380,8 @@ void setup() {
   Serial.println("Going through set-up process");
 
   // List known wifi
-  wifiAutoSelector.add(wifi_ssid_B, wifi_password_B);
   wifiAutoSelector.add(wifi_ssid_A, wifi_password_A);
+  wifiAutoSelector.add(wifi_ssid_B, wifi_password_B);
   wifiAutoSelector.add(wifi_ssid_C, wifi_password_C);
   wifiAutoSelector.add(wifi_ssid_D, wifi_password_D);
   wifiAutoSelector.add(wifi_ssid_E, wifi_password_E);
@@ -329,36 +392,82 @@ void setup() {
   // Build MQTT topics
   // ESP core topic client id using last Character of MAC address
   strcat(ESP_topic,CLIENT_NAME);
-  WiFi.macAddress().toCharArray(MAC_buffer,18);
-  strcat(ESP_topic, MAC_buffer+9);
+//  WiFi.macAddress().toCharArray(MAC_buffer,18);
+//  strcat(ESP_topic, MAC_buffer+9);
   // set MQTT parameters
   MQTTclient.setServer(mqtt_server, 1883);    //Configuration de la connexion au serveur MQTT
   MQTTclient.setCallback(callback);  //La fonction de callback qui est executée à chaque réception de message
 
   // Create Sensors & Actuators
-  sensors[0].begin("DHT",0,2,"DHT",String("DHT22")); // name, id, pin, topic, type - known types DHT22, DS18B20
-  //sensors[1].begin("DS18B20",1,2,"DS18B20",String("DS18B20")); // name, id, pin, topic, type - known types DHT22, DS18B20
-  //actuators[0].begin("relay",0,12,"relay",String("relay")); // name, id, pin, topic, type - known types relay, LED
-  //actuators[1].begin("LED",0,13,"LED",String("LED")); // name, id, pin, topic, type - known types relay, LED
+  sensors[0].begin("Button",0,0,"Button",String("button")); // name, id, pin, topic, type - known types DHT22, DS18B20, SHT31, button (pin 2 and 3 for I2C)
+  //sensors[0].begin("DS18B20",0,4,"DS18B20",String("DS18B20")); // name, id, pin, topic, type - known types DHT22, DS18B20, button
+  actuators[0].begin("Cloture",0,12,"Cloture",String("relay")); // name, id, pin, topic, type - known types relay, LED - used relay so that 0 = no heating
+  actuators[1].begin("Led",1,13,"LED",String("LED")); // name, id, pin, topic, type - known types relay, LED - used LED so that 0 = no heating
 
   // on a SonOff, relay = pin 12, led = pin 13, button = pin 0
+
 
   // Connect to best wifi among available
   if (setup_wifi()==0){
       MQTTreconnect();
       MQTTclient.loop();
   }
+  else
+  {
+    delay(5000);
+    ESP.restart();
+  }
+
+    ArduinoOTA.onStart([]() {
+    String type;
+    if (ArduinoOTA.getCommand() == U_FLASH) {
+      type = "sketch";
+    } else { // U_FS
+      type = "filesystem";
+    }
+
+    // NOTE: if updating FS this would be the place to unmount FS using FS.end()
+    Serial.println("Start updating " + type);
+  });
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\nEnd");
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) {
+      Serial.println("Auth Failed");
+    } else if (error == OTA_BEGIN_ERROR) {
+      Serial.println("Begin Failed");
+    } else if (error == OTA_CONNECT_ERROR) {
+      Serial.println("Connect Failed");
+    } else if (error == OTA_RECEIVE_ERROR) {
+      Serial.println("Receive Failed");
+    } else if (error == OTA_END_ERROR) {
+      Serial.println("End Failed");
+    }
+  });
+  ArduinoOTA.begin();
+  Serial.println("OTA ready");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+
 }
 
 void loop() {
   int i;
+
+  ArduinoOTA.handle();
+  MQTTclient.loop();
 
   // If publish interval is completed
   if (millis() - last_sent > send_period * 1000)
   {
     // reconnect to wifi if needed to correct for HW errors
     if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("Reconnecting to Wifi after drop");
+      Serial.println("Reconnecting to Wifi ater drop");
       setup_wifi();
     }
     // Reconnect to MQTT broker and re-subscribe
@@ -379,13 +488,24 @@ void loop() {
         Serial.println("Sensor not recognized");
       }
     }
+    // publish all available actuators status
+    for (i=0; i<(sizeof(actuators)/sizeof(Actuator)); i++){
+      Serial.print("Working actuator #: ");
+      Serial.println(i);
+      if (actuators[i].sendStatus()==0){
+        Serial.print("Actuator ");
+        Serial.print(i);
+        Serial.println(" published.");
+      }
+      else {
+        Serial.println("Actuator not recognized");
+      }
+    }
     last_sent = millis();
   }
   if (last_sent > millis()) { // means millis has been reset => reset last_sent
     last_sent = millis();
   }
-  MQTTclient.loop();
-
 }
 
 
@@ -403,4 +523,50 @@ float read_ds18B20 (int oneWirePin){
   Serial.println(temptemp);
   } while (temptemp == 85.0 || temptemp == (-127.0));
   return temptemp;
+}
+
+
+int read_button(int buttonPin){
+
+  // Variables will change:
+  int buttonState;             // the current reading from the input pin
+  int lastButtonState = LOW;   // the previous reading from the input pin
+
+  // the following variables are unsigned longs because the time, measured in
+  // milliseconds, will quickly become a bigger number than can be stored in an int.
+
+  unsigned long startReading = millis();  // the last time the output pin was toggled
+  unsigned long readDelay = 800;    // the debounce time; increase if the output flickers  
+  unsigned long lastDebounceTime = 0;  // the last time the output pin was toggled
+  unsigned long debounceDelay = 50;    // the debounce time; increase if the output flickers
+  int reading;
+
+  pinMode(buttonPin, INPUT);
+
+  while ((millis() - startReading) > readDelay) {
+    // read the state of the switch into a local variable:
+    reading = digitalRead(buttonPin);
+
+    // check to see if you just pressed the button
+    // (i.e. the input went from LOW to HIGH), and you've waited long enough
+    // since the last press to ignore any noise:
+
+    // If the switch changed, due to noise or pressing:
+    if (reading != lastButtonState) {
+      // reset the debouncing timer
+      lastDebounceTime = millis();
+    }
+
+    if ((millis() - lastDebounceTime) > debounceDelay) {
+      // whatever the reading is at, it's been there for longer than the debounce
+      // delay, so take it as the actual current state:
+
+      // if the button state has changed:
+      if (reading != buttonState) {
+        buttonState = reading;
+        return reading;
+      }
+      lastButtonState = reading;
+    }
+  }
 }

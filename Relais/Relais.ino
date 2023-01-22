@@ -17,6 +17,10 @@
 // 2019-05 rewrite with sensor and actuator classes
 // 2019-09 added regular retry to select best network
 // 2020-03 added option to adjust sensor send period by sending an int to topic period
+// 2020-04 added OTA, added actuator::sendStatus
+
+// To do - Need to adjsut dynamically the number of sensors/ actuators, today set at 2 each
+
 
 // Mode
 bool debug = true;  //Affiche sur la console si True
@@ -60,6 +64,7 @@ class Actuator {
 
     int begin(char* Name, byte Id, byte Pin, char* Topic, String Type);
     int act(char* message);
+    int sendStatus(void);
 };
 
 
@@ -100,7 +105,6 @@ int Sensor::begin(char* Name, byte Id, byte Pin, char* Topic, String Type){
   strcat(myTopic,"/datas/");
   strcat(myTopic, Topic);
   myType=Type;
-  pinMode(myPin, INPUT_PULLUP); // set as input - with pullup
   return 0;
 }
 
@@ -111,6 +115,7 @@ int Sensor::senseAndPublish(void){
   if(myType=="DHT22") {
     //read DHT
     DHT dht(myPin, DHT22);
+    dht.begin();
     delay(200);
     float temp_f=dht.readTemperature();
     float humi_f= dht.readHumidity();
@@ -150,26 +155,48 @@ int Actuator::begin(char* Name, byte Id, byte Pin, char* Topic, String Type){
 }
 
 int Actuator::act(char* message){
+  char pub_topic[80];
+
+  sprintf(pub_topic, "%s%s",myTopic,"/status");
   if(myType=="relay") {
     if (strcmp(message,"1.0")==0) {
       digitalWrite(myPin,HIGH);
+      sendMQTT(pub_topic,1.0);
     } else {
       digitalWrite(myPin,LOW);
+      sendMQTT(pub_topic,0.0);
     }
     return 0;
   }
   if(myType=="LED") {
     if (strcmp(message,"1.0")==0) {
       digitalWrite(myPin,LOW);
+      sendMQTT(pub_topic,1.0);
     } else {
       digitalWrite(myPin,HIGH);
+      sendMQTT(pub_topic,0.0);
     }
     return 0;
   }
   return -1; // actuator type has not been recogniezd in switch statment
-
 }
 
+int Actuator::sendStatus(void){
+  byte pin_status;
+  char pub_topic[80];
+
+  sprintf(pub_topic, "%s%s",myTopic,"/status");
+  pin_status=digitalRead(myPin);
+  if(myType=="relay") {
+    sendMQTT(pub_topic,(float) (pin_status));
+    return 0;
+  }
+  if(myType=="LED") {
+    sendMQTT(pub_topic,1.0-(float) (pin_status));
+    return 0;
+  }
+  return -1;
+}
 //*************************************************************************** Key functions *******************************************************//
 //Connexion to best known WiFi 
 int setup_wifi(){
@@ -336,10 +363,10 @@ void setup() {
   MQTTclient.setCallback(callback);  //La fonction de callback qui est executée à chaque réception de message
 
   // Create Sensors & Actuators
-  sensors[0].begin("DHT",0,2,"DHT",String("DHT22")); // name, id, pin, topic, type - known types DHT22, DS18B20
+  sensors[0].begin("DS18B20",0,13,"DS18B20",String("DS18B20")); // name, id, pin, topic, type - known types DHT22, DS18B20
   //sensors[1].begin("DS18B20",1,2,"DS18B20",String("DS18B20")); // name, id, pin, topic, type - known types DHT22, DS18B20
-  //actuators[0].begin("relay",0,12,"relay",String("relay")); // name, id, pin, topic, type - known types relay, LED
-  //actuators[1].begin("LED",0,13,"LED",String("LED")); // name, id, pin, topic, type - known types relay, LED
+  actuators[0].begin("Circulateur",0,14,"circulateur",String("relay")); // name, id, pin, topic, type - known types relay, LED - used relay so that 0 = no heating
+  actuators[1].begin("Vanne_eau",1,16,"vanne_eau",String("LED")); // name, id, pin, topic, type - known types relay, LED - used LED so that 0 = no heating
 
   // on a SonOff, relay = pin 12, led = pin 13, button = pin 0
 
@@ -423,6 +450,19 @@ void loop() {
       }
       else {
         Serial.println("Sensor not recognized");
+      }
+    }
+    // publish all available actuators status
+    for (i=0; i<(sizeof(actuators)/sizeof(Actuator)); i++){
+      Serial.print("Working actuator #: ");
+      Serial.println(i);
+      if (actuators[i].sendStatus()==0){
+        Serial.print("Actuator ");
+        Serial.print(i);
+        Serial.println(" published.");
+      }
+      else {
+        Serial.println("Actuator not recognized");
       }
     }
     last_sent = millis();
